@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+
+if ! [ -x "$(command -v docker-compose)" ]; then
+    shopt -s expand_aliases
+    alias docker-compose='docker compose'
+fi
+
+# Змінні кольори, для зручнішої роботи з ними
+RED='\033[0;31m'
+WHITE='\033[1;37m'
+GREEN='\033[0;32m'
+ORANGE='\033[0;33m'
+GREY='\033[0;37m'
+
+# Закриває "тег" для кольорів
+NC='\033[0m'
+
+# Система, на якій запускається докер
+UNAMEOUT="$(uname -s)"
+
+# Verify operating system is supported...
+case "${UNAMEOUT}" in
+Linux*) MACHINE=linux ;;
+Darwin*) MACHINE=mac ;;
+*) MACHINE="UNKNOWN" ;;
+esac
+
+if [ "$MACHINE" == "UNKNOWN" ]; then
+    echo -e "${ORANGE}Unsupported operating system [$(uname -s)]. Supports macOS, Linux, and Windows (WSL2).${NC}" >&2
+
+    exit 1
+fi
+
+# Підключаємо .env файл
+if [ -f "./.env" ]; then
+    source "./.env"
+else
+    echo -e "${RED}Переконайтеся, що ви визначили .env файл${NC}\""
+
+    exit 1
+fi
+
+# Вивід довідки
+function show_help() {
+    echo -e "${WHITE}Використання:${NC}"
+    echo -e "  ${GREEN}srv${NC} ${WHITE}[COMMAND]${NC} ${GREY}[ARGS...]${NC}"
+
+    echo
+    echo -e "${WHITE}Команды:${NC}"
+    echo -e "  ${GREEN}help${NC}                      ${WHITE}Виклик довідки${NC}"
+
+    echo
+    echo -e "  ${GREEN}build${NC}                     ${WHITE}Сбір образів${NC}"
+    echo -e "  ${GREEN}up${NC}                        ${WHITE}Запустити всі контейнери${NC}"
+    echo -e "  ${GREEN}down${NC}                      ${WHITE}Зупинити всі контейнери${NC}"
+    echo -e "  ${GREEN}restart${NC}                   ${WHITE}Перезапустити всі контейнери${NC}"
+    echo -e "  ${GREEN}profile${NC}                   ${WHITE}Перезапустити всі контейнери з xdebug профайлером${NC}"
+    echo -e "  ${GREEN}worker-restart${NC}            ${WHITE}Перезапустити контейнер воркера${NC}"
+
+    echo
+    echo -e "  ${GREEN}[shell|bash]${NC} ${WHITE}[container]${NC}  ${WHITE}Запустити оболонку bash у потрібному контейнері${NC}"
+    echo -e "  ${GREEN}redis${NC}                     ${WHITE}Увійти до терміналу Redis контейнера${NC}"
+
+    echo
+    echo -e "  ${GREEN}php${NC} ${WHITE}[command]${NC}             ${WHITE}Виконати команду php${NC}"
+    echo -e "  ${GREEN}composer${NC} ${WHITE}[command]${NC}        ${WHITE}Виконати команду композера${NC}"
+    echo -e "  ${GREEN}artisan${NC} ${WHITE}[command]${NC}         ${WHITE}Виконати команду Artisan від імені www-data${NC}"
+    echo -e "  ${GREEN}migrate${NC}                   ${WHITE}Виконати міграції БД${NC}"
+    echo -e "  ${GREEN}migrate-rollback${NC}          ${WHITE}Відкотити міграції БД${NC}"
+    echo -e "  ${GREEN}db-fresh${NC}                  ${WHITE}migrate:fresh && db:seed${NC}"
+
+    if [ "${APP_ENV}" == 'dev' ]; then
+        echo -e "                            ${WHITE}Потрібно виключно для складання кабінету оператора${NC}"
+        echo -e "  ${GREEN}ide-helper${NC}                ${WHITE}Згенерувати файли підказок для IDE${NC}"
+    fi
+
+    echo
+    echo -e "  ${GREEN}docker-compose${NC} ${WHITE}[command]${NC}  ${WHITE}Запускаємо команду самого docker-compose${NC}"
+    echo -e "  ${GREEN}generate-certificates${NC} ${WHITE}Генерація ssl сертифіката для всіх доменів у файлі /etc/hosts. Потрібно запускати від sudo. Встановлюються деякі залежності для роботи генератора (зазвичай вони дефолтом вже встановлені). Потрібно перезапустити браузер після закінчення команди."${NC}
+    echo -e "  ${GREEN}test${NC} ${WHITE}Запуск PhpUnit"${NC}
+    echo -e "  ${GREEN}pint${NC} ${WHITE}Запуск pint"${NC}
+    echo -e "  ${GREEN}pint-test${NC} ${WHITE}Запуск pint --test"${NC}
+}
+
+# Вивід помилки під час спроби виконати невизначену команду
+function unknown_command_handler() {
+    echo -e "${RED}No such command:${NC} ${ORANGE}$1${NC}"
+    echo
+
+    show_help
+}
+
+if [ $# -gt 0 ]; then
+    # Виклик довідки
+    if [ "$1" == "help" ]; then
+        show_help
+
+    # Сбір образів
+    elif [ "$1" == "build" ]; then
+        docker-compose build --no-cache php-fpm-tnk laravel-horizon nginx postgres pgbackups redis
+
+        if [ "${RUN_TRAEFIK}" == "true" ]; then
+            docker-compose build --no-cache traefik mailpit
+        fi
+
+    # Запустити всі контейнери
+    elif [ "$1" == "up" ]; then
+        if [ "${RUN_TRAEFIK}" == "true" ]; then
+            docker-compose up -d traefik mailpit
+        fi
+
+        docker-compose up -d php-fpm-tnk laravel-horizon nginx postgres pgbackups redis
+
+    # Зупинити всі контейнери
+    elif [ "$1" == "down" ]; then
+        docker-compose down
+
+    # Перезапустити всі контейнери
+    elif [ "$1" == "restart" ]; then
+        docker-compose down
+
+        ./srv up
+
+    # Перезапустити всі контейнери з xdebug профайлером
+    elif [ "$1" == "profile" ]; then
+        docker-compose down
+
+        XDEBUG_MODE=profile docker-compose up -d php-fpm-tnk php-worker laravel-horizon nginx postgres redis
+
+        if [ "${RUN_TRAEFIK}" == "true" ]; then
+            docker-compose up -d traefik mailpit
+        fi
+
+    # Перезапустити контейнер воркера
+    elif [ "$1" == "worker-restart" ] || [ "$1" == "horizon-restart" ]; then
+        docker-compose restart laravel-horizon
+
+    # Запустити оболонку bash у потрібному контейнері
+    elif [ "$1" == "shell" ] || [ "$1" == "bash" ]; then
+        shift 1
+
+        docker-compose exec "$1" bash
+
+    # Виконати команду php
+    elif [ "$1" == "php" ]; then
+        shift 1
+
+        docker-compose exec php-fpm-tnk bash php "$@"
+
+    # Виконати команду композера
+    elif [ "$1" == "composer" ]; then
+        shift 1
+
+        docker-compose exec php-fpm-tnk composer "$@"
+
+    # Виконати команду Artisan
+    elif [ "$1" == "artisan" ] || [ "$1" == 'art' ]; then
+        shift 1
+
+    docker-compose exec php-fpm-tnk su -l www-data -s /usr/local/bin/php /var/www/artisan "$@"
+
+    # Run pint
+    elif [ "$1" == "pint" ]; then
+      shift 1
+
+      docker-compose exec php-fpm-tnk ./vendor/bin/pint
+
+    # Run pint test
+    elif [ "$1" == "pint-test" ]; then
+      shift 1
+
+      docker-compose exec php-fpm-tnk ./vendor/bin/pint --test
+
+    # Виконати міграції БД
+    elif [ "$1" == "migrate" ]; then
+        docker-compose exec php-fpm-tnk php artisan migrate
+
+    # Виконати міграції БД + Seeds
+    elif [ "$1" == "db-fresh" ]; then
+        ./srv art migrate:fresh
+        ./srv art db:seed
+
+    # Відкотити міграції БД
+    elif [ "$1" == "migrate-rollback" ]; then
+        docker-compose exec php-fpm-tnk php artisan migrate:rollback
+
+    # Увійти до терміналу Redis контейнера
+    elif [ "$1" == "redis" ]; then
+        docker-compose exec redis redis-cli
+
+    # Згенерувати файли підказок для IDE
+    elif [ "$1" == "ide-helper" ] && [ "${APP_ENV}" == "dev" ]; then
+        docker-compose exec php-fpm-tnk php artisan ide-helper:generate &&
+            docker-compose exec php-fpm-tnk php artisan ide-helper:meta &&
+            docker-compose exec php-fpm-tnk php artisan ide-helper:model
+
+    # Запуск PhpUnit
+    elif [ "$1" == "test" ]; then
+        docker-compose -f docker-compose.phpunit.yml up --build -d >>/dev/null 2>&1 &&
+            docker-compose -f docker-compose.phpunit.yml exec php-cli php /var/www/vendor/phpunit/phpunit/phpunit --exclude-group e2e --coverage-html docker/data/reports/coverage --configuration /var/www/phpunit.xml &&
+            docker-compose -f docker-compose.phpunit.yml exec php-cli cp /var/www/docker/phpunit/test-coverage.css /var/www/docker/data/reports/coverage/_css/custom.css &&
+            docker-compose -f docker-compose.phpunit.yml down >>/dev/null 2>&1
+
+    # Запускаємо команду docker-compose
+    elif [ "$1" == "docker-compose" ]; then
+        shift 1
+
+        docker-compose "$@"
+
+    else
+        unknown_command_handler "$@"
+    fi
+else
+    unknown_command_handler "$@"
+fi
